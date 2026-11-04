@@ -13,7 +13,7 @@
       },
       "versions": {
         "1.2.0": {
-          "url": "https://freedoom122.github.io/DoomSMP-local-timestamp-editor-repo/dev-local-timestamp-editor-plugin-1.2.0.zip",
+          "url": "https://raw.githubusercontent.com/freedoom122/DoomSMP-local-timestamp-editor-repo/main/dev-local-timestamp-editor-plugin-1.2.0.zip",
           "sha256": "4823ec69e594a750292d0d70d4ab283db88ad1d2b0018374d5306b993d39c90b",
           "size": 19754,
           "dependencies": {
