@@ -1,0 +1,25 @@
+name: Publish Revenge plugin
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'dev-local-timestamp-editor-plugin-1.2.0.zip'
+      - '.github/workflows/publish.yml'
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract plugin files
+        run: |
+          mkdir -p local-timestamp-editor
+          unzip -o dev-local-timestamp-editor-plugin-1.2.0.zip -d local-timestamp-editor
+      - name: Commit published files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add local-timestamp-editor/manifest.json local-timestamp-editor/index.js
+          git diff --cached --quiet || git commit -m "Publish Local Timestamp Editor plugin"
+          git push
