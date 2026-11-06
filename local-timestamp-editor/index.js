@@ -1443,7 +1443,7 @@ function createOverrideStore(storage, events) {
   }
   function persist() {
     if (readOnly) return Promise.resolve(false);
-    writeChain = writeChain.then(async () => {
+    const operation = writeChain.then(async () => {
       try {
         await storage.set(snapshot(), true);
         return true;
@@ -1454,7 +1454,30 @@ function createOverrideStore(storage, events) {
         return false;
       }
     });
-    return writeChain;
+    writeChain = operation.then(() => void 0, () => void 0);
+    return operation;
+  }
+  function enqueueChange(change) {
+    const operation = writeChain.then(async () => {
+      if (readOnly) return false;
+      const previous = [...records.entries()];
+      const result = change();
+      if (!result.changed) return result.value;
+      try {
+        await storage.set(snapshot(), true);
+      } catch (error) {
+        records.clear();
+        for (const [key, record] of previous) records.set(key, record);
+        writeFailures++;
+        lastWriteError = error instanceof Error ? error.message : String(error);
+        events.onError("Failed to save timestamp overrides", error);
+        return false;
+      }
+      notify();
+      return result.value;
+    });
+    writeChain = operation.then(() => void 0, () => void 0);
+    return operation;
   }
   async function load() {
     let raw;
@@ -1538,52 +1561,45 @@ function createOverrideStore(storage, events) {
         return false;
       }
       const key = overrideKey(normalised.channelId, normalised.messageId);
-      const existing = records.get(key);
-      if (!existing && records.size >= MaxOverrides) {
-        events.onError(
-          `Cannot store more than ${MaxOverrides} overrides. Remove some first.`
-        );
-        return false;
-      }
-      const now = Date.now();
-      records.set(key, {
-        ...normalised,
-        createdAtMs: existing?.createdAtMs ?? now,
-        updatedAtMs: now
+      return enqueueChange(() => {
+        const existing = records.get(key);
+        if (!existing && records.size >= MaxOverrides) {
+          events.onError(
+            `Cannot store more than ${MaxOverrides} overrides. Remove some first.`
+          );
+          return { changed: false, value: false };
+        }
+        const now = Date.now();
+        records.set(key, {
+          ...normalised,
+          createdAtMs: existing?.createdAtMs ?? now,
+          updatedAtMs: now
+        });
+        return { changed: true, value: true };
       });
-      if (!await persist()) {
-        if (existing) records.set(key, existing);
-        else records.delete(key);
-        return false;
-      }
-      notify();
-      return true;
     },
     async remove(channelId, messageId) {
-      if (readOnly) return false;
       const key = overrideKey(channelId, messageId);
-      const existing = records.get(key);
-      if (!existing) return false;
-      records.delete(key);
-      if (!await persist()) {
-        records.set(key, existing);
-        return false;
-      }
-      notify();
-      return true;
+      return enqueueChange(() => {
+        const existing = records.get(key);
+        if (!existing) return { changed: false, value: false };
+        records.delete(key);
+        return { changed: true, value: true };
+      });
     },
     async removeAll() {
-      if (readOnly || records.size === 0) return false;
-      const previous = [...records.entries()];
-      const removed = records.size;
-      records.clear();
-      if (!await persist()) {
-        for (const [key, record] of previous) records.set(key, record);
+      return enqueueChange(() => {
+        if (records.size === 0) return { changed: false, value: false };
+        const removed = records.size;
+        records.clear();
+        return { changed: true, value: removed };
+      }).then((result) => {
+        if (result > 0) {
+          events.log(`Removed ${result} stored override(s).`);
+          return true;
+        }
         return false;
-      }
-      notify();
-      events.log(`Removed ${removed} stored override(s).`);
-      return true;
+      });
     },
     subscribe(listener) {
       listeners.add(listener);
