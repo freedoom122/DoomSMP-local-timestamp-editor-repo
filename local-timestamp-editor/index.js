@@ -321,20 +321,30 @@ function noteFailure(stats, error) {
   stats.failures++;
   stats.lastFailure = describeError(error);
 }
-function overrideInstantIso(record) {
-  return toIsoString(record.customTimestampMs);
+function effectiveTimestampMs(record, settings = DefaultSettings) {
+  if (!settings.keepSavedWallClock) return record.customTimestampMs;
+  const resolution = resolveWallClock(record.wallClock);
+  if (resolution.kind === "exact") return resolution.ms;
+  if (resolution.kind === "ambiguous")
+    return record.ambiguous === "later" ? resolution.laterMs : resolution.earlierMs;
+  return record.customTimestampMs;
+}
+function overrideInstantIso(record, settings = DefaultSettings) {
+  return toIsoString(effectiveTimestampMs(record, settings));
 }
 function channelIdOf(message, fallback) {
-  return isSnowflake(message.channelId) ? message.channelId : fallback;
+  if (isSnowflake(message.channelId)) return message.channelId;
+  if (isSnowflake(message.channel_id)) return message.channel_id;
+  return fallback;
 }
-function applyMessageOverride(holder, message, fallbackChannelId, source, stats) {
+function applyMessageOverride(holder, message, fallbackChannelId, source, stats, settings) {
   if (!isIsoTimestamp(message.timestamp)) return false;
   const record = source.lookup(
     channelIdOf(message, fallbackChannelId),
     message.id
   );
   if (!record) return false;
-  const iso = overrideInstantIso(record);
+  const iso = overrideInstantIso(record, settings);
   if (message.timestamp === iso) return false;
   try {
     holder.message = { ...message, timestamp: iso };
@@ -345,7 +355,7 @@ function applyMessageOverride(holder, message, fallbackChannelId, source, stats)
     return false;
   }
 }
-function applyRowOverride(row, source, stats) {
+function applyRowOverride(row, source, stats, settings) {
   if (!source.hasAny() || !isRecord(row) || row.type !== MessageRowType)
     return false;
   let changed = false;
@@ -355,7 +365,8 @@ function applyRowOverride(row, source, stats) {
       row.message,
       row.channelId,
       source,
-      stats
+      stats,
+      settings
     );
   const content = row.content;
   if (Array.isArray(content)) {
@@ -365,9 +376,10 @@ function applyRowOverride(row, source, stats) {
       if (applyMessageOverride(
         child,
         child.message,
-        child.channelId ?? row.channelId,
+        child.channelId ?? child.channel_id ?? row.channelId ?? row.channel_id,
         source,
-        stats
+        stats,
+        settings
       ))
         changed = true;
     }
@@ -390,23 +402,23 @@ function createDisplayCopyCache() {
     }
   };
 }
-function placedRow(item, index, source) {
+function placedRow(item, index, source, settings) {
   if (!isRecord(item) || item.type !== MessageRowType) return void 0;
   const message = item.message;
   if (!isRecord(message) || !isSnowflake(message.id)) return void 0;
   const channelId = channelIdOf(message, item.channelId);
   if (!isSnowflake(channelId)) return void 0;
   const record = source.lookup(channelId, message.id);
-  const instant = record ? record.customTimestampMs : isIsoTimestamp(message.timestamp) ? Date.parse(message.timestamp) : Number.NaN;
+  const instant = record ? effectiveTimestampMs(record, settings) : isIsoTimestamp(message.timestamp) ? Date.parse(message.timestamp) : Number.NaN;
   if (!Number.isFinite(instant)) return void 0;
   return { index, channelId, instant, overridden: record !== void 0 };
 }
-function reorderRowList(rows, source) {
+function reorderRowList(rows, source, settings) {
   if (!source.hasAny() || !Array.isArray(rows) || rows.length < 2)
     return void 0;
   const byChannel = /* @__PURE__ */ new Map();
   for (let index = 0; index < rows.length; index++) {
-    const placed = placedRow(rows[index], index, source);
+    const placed = placedRow(rows[index], index, source, settings);
     if (!placed) continue;
     const group = byChannel.get(placed.channelId);
     if (group) group.push(placed);
@@ -426,12 +438,12 @@ function reorderRowList(rows, source) {
   }
   return output;
 }
-function overrideListArgs(args, source, stats) {
+function overrideListArgs(args, source, stats, settings) {
   if (!source.hasAny()) return args;
   const props = args[1];
   if (!isRecord(props)) return args;
   try {
-    const reordered = reorderRowList(props.data, source);
+    const reordered = reorderRowList(props.data, source, settings);
     if (!reordered) return args;
     args[1] = { ...props, data: reordered };
     stats.listReorders++;
@@ -440,7 +452,7 @@ function overrideListArgs(args, source, stats) {
   }
   return args;
 }
-function overrideJsxArgs(args, source, cache, stats) {
+function overrideJsxArgs(args, source, cache, stats, settings) {
   if (!source.hasAny()) return args;
   const props = args[1];
   if (!isRecord(props)) return args;
@@ -450,10 +462,10 @@ function overrideJsxArgs(args, source, cache, stats) {
       if (typeof nested.timestamp === "string") stats.skipped++;
       return args;
     }
-    const channelId = channelIdOf(nested, props.channelId);
+    const channelId = channelIdOf(nested, props.channelId ?? props.channel_id);
     const record = source.lookup(channelId, nested.id);
     if (!record) return args;
-    const iso = overrideInstantIso(record);
+    const iso = overrideInstantIso(record, settings);
     if (nested.timestamp === iso) return args;
     try {
       args[1] = {
@@ -475,10 +487,10 @@ function overrideJsxArgs(args, source, cache, stats) {
       if (typeof props.timestamp === "string") stats.skipped++;
       return args;
     }
-    const channelId = isSnowflake(props.channelId) ? props.channelId : props.channel_id;
+    const channelId = isSnowflake(props.channelId) ? props.channelId : isSnowflake(props.channel_id) ? props.channel_id : props.channel?.id;
     const record = source.lookup(channelId, props.id);
     if (!record) return args;
-    const iso = overrideInstantIso(record);
+    const iso = overrideInstantIso(record, settings);
     if (props.timestamp === iso) return args;
     try {
       args[1] = { ...props, timestamp: iso };
@@ -531,7 +543,7 @@ function bindDisplayOverrides(options) {
         () => (0, import_patcher.after)(prototype, "generate", (row) => {
           if (options.rowStrategyEnabled()) {
             try {
-              applyRowOverride(row, options.source, options.stats);
+              applyRowOverride(row, options.source, options.stats, options.settings());
             } catch (error) {
               options.onError(
                 "Failed to apply a timestamp override to a message row",
@@ -550,13 +562,15 @@ function bindDisplayOverrides(options) {
       args,
       options.source,
       cache,
-      options.stats
+      options.stats,
+      options.settings()
     );
     if (!options.reorderEnabled()) return patched;
     return overrideListArgs(
       patched,
       options.source,
-      options.stats
+      options.stats,
+      options.settings()
     );
   }
   function patchCreateElement(args) {
@@ -565,13 +579,15 @@ function bindDisplayOverrides(options) {
       args,
       options.source,
       cache,
-      options.stats
+      options.stats,
+      options.settings()
     );
     if (!options.reorderEnabled()) return patched;
     return overrideListArgs(
       patched,
       options.source,
-      options.stats
+      options.stats,
+      options.settings()
     );
   }
   const hooks = [
@@ -596,9 +612,10 @@ function pluginContext() {
 }
 async function restoreOriginalTimestamp(context, channelId, messageId) {
   const removed = await context.store.remove(channelId, messageId);
+  const failed = !removed && context.store.lookup(channelId, messageId) !== void 0;
   context.toast(
-    removed ? "Original timestamp restored." : "There was no override to remove.",
-    removed ? "success" : "default"
+    removed ? "Original timestamp restored." : failed ? "The override could not be removed. Check the plugin error log." : "There was no override to remove.",
+    removed ? "success" : failed ? "critical" : "default"
   );
   return removed;
 }
@@ -630,7 +647,7 @@ var PresetLabels = {
 };
 var FormatPresets = Object.keys(PresetLabels);
 function isFormatPreset(value) {
-  return typeof value === "string" && value in PresetLabels;
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(PresetLabels, value);
 }
 function normaliseSettings(raw) {
   const preset = isFormatPreset(raw?.preset) ? raw.preset : DefaultSettings.preset;
@@ -1105,7 +1122,7 @@ function Editor({
       ] }) : null,
       resolutionError ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "text-feedback-critical", variant: "text-xs/medium", children: resolutionError }) : null,
       !request.originalTimestamp ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "text-feedback-critical", variant: "text-xs/medium", children: "The original timestamp of this message could not be read, so it will not be changed." }) : null,
-      context.store.readOnly ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "text-feedback-critical", variant: "text-xs/medium", children: "Overrides are read-only because the stored data was written by a newer version of this plugin." }) : null
+      context.store.readOnly ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "text-feedback-critical", variant: "text-xs/medium", children: context.store.diagnostics().loadFailed ? "Overrides are read-only because stored data could not be read. Restart after checking storage access; existing data has been protected." : "Overrides are read-only because the stored data was written by a newer version of this plugin." }) : null
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(Stack, { direction: "horizontal", spacing: 8, style: styles.actions, children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
@@ -1187,10 +1204,10 @@ function timestampActions(props) {
   const context = pluginContext();
   const message = props.message;
   if (!context || !isRecord(message)) return void 0;
-  if (!isSnowflake(message.id) || !isSnowflake(message.channelId))
-    return void 0;
+  const channelId = channelIdOf(message, props.channelId ?? props.channel_id ?? props.channel?.id);
+  if (!isSnowflake(message.id) || !isSnowflake(channelId)) return void 0;
   if (typeof message.timestamp !== "string") return void 0;
-  const { channelId, id } = message;
+  const id = message.id;
   const record = context.store.lookup(channelId, id);
   const settings = normaliseSettings(
     context.storage.cache
@@ -1207,7 +1224,7 @@ function timestampActions(props) {
           () => openTimestampEditor({
             channelId,
             messageId: id,
-            originalTimestamp: message.timestamp,
+            originalTimestamp: record?.originalTimestamp ?? message.timestamp,
             authorName,
             content
           })
@@ -1376,6 +1393,8 @@ function createOverrideStore(storage, events) {
   const listeners = /* @__PURE__ */ new Set();
   let loaded = false;
   let readOnly = false;
+  let loadFailed = false;
+  let lastReadError;
   let dropped = 0;
   let migratedFrom;
   let writeFailures = 0;
@@ -1397,14 +1416,16 @@ function createOverrideStore(storage, events) {
     }
   }
   function persist() {
-    if (readOnly) return Promise.resolve();
+    if (readOnly) return Promise.resolve(false);
     writeChain = writeChain.then(async () => {
       try {
         await storage.set(snapshot(), true);
+        return true;
       } catch (error) {
         writeFailures++;
         lastWriteError = error instanceof Error ? error.message : String(error);
         events.onError("Failed to save timestamp overrides", error);
+        return false;
       }
     });
     return writeChain;
@@ -1415,7 +1436,10 @@ function createOverrideStore(storage, events) {
       raw = await storage.get();
     } catch (error) {
       loaded = true;
-      events.onError("Failed to read stored timestamp overrides", error);
+      readOnly = true;
+      loadFailed = true;
+      lastReadError = error instanceof Error ? error.message : String(error);
+      events.onError("Failed to read stored timestamp overrides. Editing is disabled to protect existing data.", error);
       return;
     }
     const result = readDocument(raw);
@@ -1460,6 +1484,8 @@ function createOverrideStore(storage, events) {
         dropped,
         migratedFrom,
         readOnly,
+        loadFailed,
+        lastReadError,
         writeFailures,
         lastWriteError
       };
@@ -1499,22 +1525,36 @@ function createOverrideStore(storage, events) {
         createdAtMs: existing?.createdAtMs ?? now,
         updatedAtMs: now
       });
-      await persist();
+      if (!await persist()) {
+        if (existing) records.set(key, existing);
+        else records.delete(key);
+        return false;
+      }
       notify();
       return true;
     },
     async remove(channelId, messageId) {
       if (readOnly) return false;
-      if (!records.delete(overrideKey(channelId, messageId))) return false;
-      await persist();
+      const key = overrideKey(channelId, messageId);
+      const existing = records.get(key);
+      if (!existing) return false;
+      records.delete(key);
+      if (!await persist()) {
+        records.set(key, existing);
+        return false;
+      }
       notify();
       return true;
     },
     async removeAll() {
       if (readOnly || records.size === 0) return false;
+      const previous = [...records.entries()];
       const removed = records.size;
       records.clear();
-      await persist();
+      if (!await persist()) {
+        for (const [key, record] of previous) records.set(key, record);
+        return false;
+      }
       notify();
       events.log(`Removed ${removed} stored override(s).`);
       return true;
@@ -1607,8 +1647,8 @@ function SettingsPanel({
   async function removeAll() {
     const removed = await context.store.removeAll();
     context.toast(
-      removed ? "All overrides removed." : "There were no overrides to remove.",
-      removed ? "success" : "default"
+      removed ? "All overrides removed." : overrides.length ? "Overrides could not be removed. Check the plugin error log." : "There were no overrides to remove.",
+      removed ? "success" : overrides.length ? "critical" : "default"
     );
   }
   function exportOverrides() {
@@ -1795,7 +1835,7 @@ function SettingsPanel({
         TableRow,
         {
           label: "Storage",
-          subLabel: `Schema ${SchemaVersion}, ${diagnostics.size} record(s)${diagnostics.dropped ? `, ${diagnostics.dropped} ignored` : ""}${diagnostics.writeFailures ? `, ${diagnostics.writeFailures} failed write(s)` : ""}.`
+          subLabel: `Schema ${SchemaVersion}, ${diagnostics.size} record(s)${diagnostics.dropped ? `, ${diagnostics.dropped} ignored` : ""}${diagnostics.loadFailed ? ", storage read failed (read-only)" : ""}${diagnostics.writeFailures ? `, ${diagnostics.writeFailures} failed write(s)` : ""}.`
         }
       ),
       context.stats.lastFailure ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
@@ -1844,6 +1884,7 @@ var index_default = plugin({
     const display = bindDisplayOverrides({
       source: store,
       stats,
+      settings: currentSettings,
       rowStrategyEnabled: () => currentSettings().applyToMessageRows,
       propsStrategyEnabled: () => currentSettings().applyToPropsRenderingMessages,
       reorderEnabled: () => currentSettings().moveMessages,
