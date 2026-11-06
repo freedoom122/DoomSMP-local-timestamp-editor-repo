@@ -4,7 +4,7 @@
   "name": "Local Timestamp Editor",
   "description": "Show a date and time of your choice for individual messages, and move them to that place in the chat, on this device only. Message data on Discord's servers is never changed.",
   "author": "Local Timestamp Editor contributors",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "dependencies": {
     "revenge.api": {
       "version": ">=1.2.1 <2"

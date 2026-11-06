@@ -1162,7 +1162,7 @@ function Editor({
 var import_jsx_runtime2 = __toESM(require_jsx_runtime(), 1);
 var { ActionSheet: ActionSheet2, ActionSheetRow: ActionSheetRow2 } = import_design2.Design;
 function bindMessageMenu(options) {
-  let unpatch;
+  const unpatches = [];
   let unsubscribe;
   try {
     unsubscribe = (0, import_finders2.getModules)(
@@ -1171,15 +1171,15 @@ function bindMessageMenu(options) {
       (namespace) => {
         const module = namespace;
         if (typeof module.default !== "function") return;
-        unpatch = (0, import_patcher2.instead)(
+        const unpatch = (0, import_patcher2.instead)(
           module,
           "default",
           (args, Sheet) => {
-            const tree = Reflect.apply(Sheet, void 0, args);
+            let tree = Reflect.apply(Sheet, void 0, args);
             try {
               const props = args[0];
               const group = props ? timestampActions(props) : void 0;
-              if (group) appendToActionSheet(tree, group);
+              if (group) tree = appendToActionSheet(tree, group);
             } catch (error) {
               options.onError(
                 "Failed to add the timestamp action to the message menu",
@@ -1189,6 +1189,7 @@ function bindMessageMenu(options) {
             return tree;
           }
         );
+        if (typeof unpatch === "function") unpatches.push(unpatch);
       },
       { returnNamespace: true }
     );
@@ -1197,7 +1198,13 @@ function bindMessageMenu(options) {
   }
   return () => {
     unsubscribe?.();
-    unpatch?.();
+    for (const unpatch of unpatches.splice(0)) {
+      try {
+        unpatch();
+      } catch (error) {
+        options.onError("Failed to remove a message-menu patch", error);
+      }
+    }
   };
 }
 function timestampActions(props) {
@@ -1262,10 +1269,29 @@ function closeAndRun(action) {
 }
 function appendToActionSheet(tree, group) {
   const sheet = findActionSheet(tree);
-  if (!sheet?.props) return;
-  const children = [sheet.props.children].flat().filter(Boolean);
+  if (!sheet?.props) return tree;
+  const current = sheet.props.children;
+  const children = Array.isArray(current) ? current.filter(Boolean) : current ? [current] : [];
   children.push(group);
-  sheet.props.children = children;
+  const replacement = { ...sheet, props: { ...sheet.props, children } };
+  return replaceElement(tree, sheet, replacement);
+}
+function replaceElement(element, target, replacement) {
+  if (element === target) return replacement;
+  if (Array.isArray(element)) {
+    let changed = false;
+    const next = element.map((child) => {
+      const replaced = replaceElement(child, target, replacement);
+      if (replaced !== child) changed = true;
+      return replaced;
+    });
+    return changed ? next : element;
+  }
+  if (!isRecord(element) || !isRecord(element.props)) return element;
+  const current = element.props.children;
+  const next = replaceElement(current, target, replacement);
+  if (next === current) return element;
+  return { ...element, props: { ...element.props, children: next } };
 }
 function findActionSheet(element) {
   if (!element || typeof element !== "object") return void 0;
